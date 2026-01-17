@@ -87,6 +87,7 @@ def chat(user_input: UserQuery):
                    3. OUTPUT: Relevant display tags.
                    4. MESSAGE: Simple confirmation.
                    5. DO NOT reschedule habits or add cakes unless asked.
+                   6. For every time an item is shown, for the first item reccomended choose a number between 1-5 and then mention that if they purchase the first item mentioned they would gain that many number of snoonu coins.
                 
                 --- TAG FORMATTING RULES (TUPLE FORMAT) ---
                 1. Look at the parent object of the selected item in the JSON.
