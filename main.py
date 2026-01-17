@@ -6,6 +6,7 @@ from typing import List, Tuple
 import instructor
 from openai import OpenAI
 from dotenv import load_dotenv
+import random
 
 load_dotenv()
 # --- CONFIGURATION ---
@@ -36,17 +37,16 @@ USER_PROFILE = {
     "habits": "Orders tamwin every friday, and also asks for his thobes to be taken for laundry every friday as well"
 }
 
-# --- 3. FLEXIBLE STRUCTURE ---
+# --- 3. STRUCTURE ---
 class AppResponse(BaseModel):
-    # CHANGED: Now a List of Tuples (which become Arrays in JSON)
     display_tags: List[Tuple[str, str, str]] = Field(
         ..., 
-        description="List of item details. Each item is a tuple of 3 strings: [Service Name, Store Name, Exact Item Name]."
+        description="List of [Service, Store, ItemName] tuples. MUST use exact strings from the JSON."
     )
     
     assistant_message: str = Field(
         ..., 
-        description="Natural language response. If Birthday Scenario, explain the full plan + reschedule. If normal search, just describe the items found."
+        description="Natural language response. MUST include the Snoonu Coins promotion for normal searches."
     )
 
 class UserQuery(BaseModel):
@@ -56,6 +56,8 @@ class UserQuery(BaseModel):
 # --- 4. ENDPOINT ---
 @app.post("/chat", response_model=AppResponse)
 def chat(user_input: UserQuery):
+    
+    random_coins = random.randint(1, 5)
     
     response = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -75,26 +77,25 @@ def chat(user_input: UserQuery):
                 --- LOGIC CONTROLLER ---
                 
                 **SCENARIO A: The "Birthday/Prototype" Request**
-                IF the user asks about "Friend's birthday next Friday" or "Jan 23 plan":
+                IF user asks about "Friend's birthday", "Jan 23", etc:
                    1. FIND "Fällä" boat event (Jan 23).
                    2. SELECT 1 Gift (Guitar) + 1 Cake (No Blueberries).
-                   3. MESSAGE: Pitch the "Daring Plan" and explicitly state: "I moved Tamwin & Laundry to Saturday."
+                   3. MESSAGE: Pitch the plan + "I moved Tamwin & Laundry to Saturday."
                 
                 **SCENARIO B: Normal Search Request**
-                IF the user asks for a specific item (e.g., "I want an amp", "Show me flowers"):
-                   1. SEARCH the database for that specific item.
-                   2. FILTER by price/specs if mentioned (e.g. "Budget 2000 QAR").
-                   3. OUTPUT: Relevant display tags.
-                   4. MESSAGE: Simple confirmation.
-                   5. DO NOT reschedule habits or add cakes unless asked.
-                   6. For every time an item is shown, for the first item reccomended choose a number between 1-5 and then mention that if they purchase the first item mentioned they would gain that many number of snoonu coins.
+                IF user asks for specific items:
+                   1. SEARCH the database.
+                   2. OUTPUT: Relevant tags.
+                   3. MESSAGE: Confirm items + "Buy the first item to earn {random_coins} Snoonu Coins!"
                 
-                --- TAG FORMATTING RULES (TUPLE FORMAT) ---
-                1. Look at the parent object of the selected item in the JSON.
-                2. Extract the "service" field and the "store" field.
-                3. If "store" is missing (e.g. for Events), use "N/A" or the Service name.
-                4. **FINAL FORMAT:** [Service Name, Store Name, Exact Item Name]
-                   Example: ["Snooflower", "Snooflower Store", "Red Roses"]
+                --- DATA EXTRACTION RULES (STRICT) ---
+                1. When you select an item, look at its **Root Parent Object** in the JSON.
+                2. Copy the `service` value EXACTLY. (e.g. "Music Store", not "Market").
+                3. Copy the `store` value EXACTLY. (e.g. "Virgin Megastore"). 
+                   - If `store` key is missing in the JSON object, return "N/A".
+                4. Copy the `name` value EXACTLY.
+                
+                **FINAL FORMAT:** [Exact Service String, Exact Store String, Exact Item Name]
                 """
             },
             {"role": "user", "content": f"Today is {user_input.current_date}. {user_input.query}"},
