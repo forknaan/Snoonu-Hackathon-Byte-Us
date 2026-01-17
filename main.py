@@ -29,74 +29,77 @@ def load_knowledge_base():
 
 KNOWLEDGE_BASE = load_knowledge_base()
 
-# --- 2. SEARCH ENGINE (Fixes the 383k Token Crash) ---
+# --- 2. INTELLIGENT SEARCH ENGINE ---
 def search_database(query: str, tastes: str):
     """
-    Scans the database locally to find matches BEFORE sending to AI.
-    This reduces token usage from 380,000 -> 2,000.
+    Advanced filter that preserves hierarchy (Service -> Store -> Item).
     """
-    # 1. Keywords to look for
+    # 1. Prepare Keywords
     keywords = query.lower().split() + tastes.lower().replace(",", "").split()
-    stop_words = ["the", "and", "a", "for", "is", "of", "in", "to", "my", "i", "want", "show", "me"]
+    stop_words = ["the", "and", "a", "for", "is", "of", "in", "to", "my", "i", "want", "get", "budget"]
     keywords = [w for w in keywords if w not in stop_words]
 
-    matches = []
+    results = []
 
-    # 2. Scan every item in the JSON
+    # 2. Deep Scan
     for entry in KNOWLEDGE_BASE:
-        # Get Service Name (e.g. "Music Store")
-        service_name = entry.get("service", "General")
-        store_name = entry.get("store", "N/A")
+        # Capture the Top-Level Service Name (e.g. "Flowers and Gifts", "S City")
+        service_name = entry.get("service", "General Service")
         
-        # Dig into the data categories
-        data_content = entry.get("data", {})
-        
-        # Handle "Event" structure (flat dict) vs "Store" structure (nested dict)
-        # We normalize everything into a list of items to check
-        items_to_check = []
-        
-        if isinstance(data_content, dict):
-            # It's a store with categories (e.g. "Guitars": [...])
-            for category, item_list in data_content.items():
-                if isinstance(item_list, list):
-                    for item in item_list:
-                        item["_category"] = category
-                        items_to_check.append(item)
-                # Handle single event object case
-                elif isinstance(item_list, (str, int, float)):
-                    # This might be an event object directly in 'data'
-                    items_to_check.append(data_content)
-                    break 
-        
-        # 3. Check each item for keywords
-        for item in items_to_check:
-            # Safely get string fields
-            i_name = str(item.get("name", "")).lower()
-            i_desc = str(item.get("description", "")).lower()
-            i_cat = str(item.get("_category", "")).lower()
+        # The 'data' field can be a Dictionary (Store) or List/Object (Event)
+        root_data = entry.get("data", {})
+
+        # Helper to process a single item
+        def process_item(item, store_name):
+            name = str(item.get("name", "")).lower()
+            desc = str(item.get("description", "")).lower()
             
-            # Simple Scoring
+            # Scoring
             score = 0
             for k in keywords:
-                if k in i_name or k in i_desc or k in i_cat:
+                if k in name or k in desc:
                     score += 1
             
-            # Special Rule: "Birthday" queries always grab the Boat Event
-            if "birthday" in query.lower() and "fällä" in i_name:
-                score += 100
-                
+            # Boost for Birthday + Boat combo
+            if "birthday" in query.lower() and "fällä" in name:
+                score += 500
+            
             if score > 0:
-                # Add to results with metadata
-                matches.append({
+                results.append({
                     "service": service_name,
-                    "store": store_name,
-                    "item_data": item,
+                    "store": store_name,  # Keeps exact store name
+                    "item_name": item.get("name"), # Keeps exact item name
+                    "price": item.get("price", "N/A"),
                     "score": score
                 })
 
-    # 4. Sort by score and take Top 15
-    matches.sort(key=lambda x: x["score"], reverse=True)
-    return matches[:15]
+        # Scenario A: 'data' is a Dictionary (Stores with Categories)
+        if isinstance(root_data, dict):
+            # Check if it has categories inside (e.g. "Cakes": [...])
+            # We assume the keys of 'data' are the Store Names or Categories depending on your structure
+            # If your structure is Service -> Store -> Items, we iterate differently.
+            # ADJUSTMENT: Based on your previous logs, 'data' seems to contain categories directly.
+            # Let's assume the 'entry["service"]' IS the Store/Service wrapper.
+            
+            for category, items in root_data.items():
+                if isinstance(items, list):
+                    for item in items:
+                        # If the category looks like a Store Name, use it. Otherwise use Service Name.
+                        # For safety, we pass the Category as a "Subsection" or Store identifier if needed.
+                        # If your JSON has "Virgin Megastore" as a key inside data, this captures it.
+                        process_item(item, store_name=category)
+                elif isinstance(items, dict):
+                     # Nested single item
+                     process_item(items, store_name=category)
+                     
+        # Scenario B: 'data' is a List (Direct list of items)
+        elif isinstance(root_data, list):
+            for item in root_data:
+                process_item(item, store_name="N/A")
+
+    # 3. Sort & Slice
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:10] # Send Top 10 Smartest Matches to GPT-4o
 
 # --- 3. PERSONA ---
 USER_PROFILE = {
@@ -106,17 +109,16 @@ USER_PROFILE = {
     "habits": "Orders tamwin every friday, and also asks for his thobes to be taken for laundry every friday as well"
 }
 
-# --- 4. STRUCTURE ---
+# --- 4. RESPONSE STRUCTURE ---
 class AppResponse(BaseModel):
-    # We use List[List[str]] which is easier for the AI than List[Tuple]
     display_tags: List[List[str]] = Field(
         ..., 
-        description="List of items. Each item is a list of 3 strings: [Service, Store, ItemName]."
+        description="List of lists. Format: [['Service Name', 'Store/Category Name', 'Exact Item Name']]"
     )
     
     assistant_message: str = Field(
         ..., 
-        description="Natural language response including Snoonu Coins promotion."
+        description="A helpful, conversational recommendation explaining the choices."
     )
 
 class UserQuery(BaseModel):
@@ -127,48 +129,45 @@ class UserQuery(BaseModel):
 @app.post("/chat", response_model=AppResponse)
 def chat(user_input: UserQuery):
     
-    # 1. RUN SEARCH (Filter data from 380k -> 2k tokens)
-    relevant_context = search_database(user_input.query, USER_PROFILE["tastes"])
+    # 1. Search (Python Side)
+    relevant_items = search_database(user_input.query, USER_PROFILE["tastes"])
     
-    random_coins = random.randint(1, 5)
+    # 2. Promo Logic
+    random_coins = random.randint(10, 50) # Increased coins to make it exciting
     
+    # 3. GPT-4o Logic (The Brains)
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",  # <--- UPGRADED MODEL
         response_model=AppResponse,
         messages=[
             {
                 "role": "system", 
                 "content": f"""
-                You are a smart assistant for {USER_PROFILE['name']}.
+                You are a high-end Lifestyle Consultant for {USER_PROFILE['name']}.
                 
                 USER PROFILE:
                 {json.dumps(USER_PROFILE)}
                 
-                RELEVANT ITEMS FOUND IN DATABASE:
-                {json.dumps(relevant_context)}
+                MATCHING ITEMS FOUND:
+                {json.dumps(relevant_items)}
                 
-                --- LOGIC CONTROLLER ---
+                --- INSTRUCTIONS ---
                 
-                **SCENARIO A: "Birthday/Prototype" Request**
-                (Query mentions "Friend's birthday", "Jan 23", "Friday plan")
-                   1. SELECT "Fällä" Boat + 1 Guitar + 1 Cake (No Blueberries).
-                   2. MESSAGE: "I moved Tamwin & Laundry to Saturday."
+                **SCENARIO A: Birthday/Prototype Plan**
+                (Query: "Friend's birthday", "Jan 23", "Friday plan")
+                   1. MUST Select: "Fällä" Boat + 1 Guitar + 1 Cake.
+                   2. TONE: Enthusiastic planner.
+                   3. MUST SAY: "I've moved your Friday Tamwin & Laundry habits to Saturday."
                 
-                **SCENARIO B: Normal Search Request**
-                   1. Pick the best matching items from the RELEVANT ITEMS list.
-                   2. Filter by budget if asked.
-                   3. MESSAGE: "Buy the first item to earn {random_coins} Snoonu Coins!"
+                **SCENARIO B: Specific Item Search**
+                (Query: "I want an amp", "Find me flowers")
+                   1. Select the best matching items from the provided list.
+                   2. TONE: Helpful shopping assistant. 
+                   3. **PROMO:** You MUST mention: "By the way, if you snap up the first item on this list, you'll earn {random_coins} Snoonu Coins!"
                 
-                --- FORMATTING RULES ---
-                OUTPUT FORMAT: A list of lists.
-                [
-                  ["Service Name", "Store Name", "Exact Item Name"],
-                  ["Service Name", "Store Name", "Exact Item Name"]
-                ]
-                
-                IMPORTANT:
-                - Use the 'service' and 'store' fields EXACTLY as they appear in the RELEVANT ITEMS list.
-                - If 'store' is N/A, keep it as "N/A".
+                **DATA FORMATTING (CRITICAL):**
+                - Output `display_tags` as a list of lists: `[["Service", "Store", "Item"]]`.
+                - Use the EXACT strings from the 'MATCHING ITEMS FOUND' list. Do not invent names.
                 """
             },
             {"role": "user", "content": f"Today is {user_input.current_date}. {user_input.query}"},
